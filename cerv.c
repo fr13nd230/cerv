@@ -51,29 +51,45 @@ int main(int argc, char *argv[]) {
     exit(-1);
   }
 
+  int acceptfd;
   socklen_t addr_len = sizeof(addr);
-  int acceptfd = accept(sockfd, (struct sockaddr *)&addr, &addr_len);
-  if (errno == -1 || acceptfd < 0) {
-    perror("Failed to accept incoming connections");
-    close(sockfd);
-    close(acceptfd);
-    exit(-1);
-  }
-
+  const char *http_response =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/html; charset=UTF-8\r\n"
+      "Connection: close\r\n"
+      "\r\n" // Crucial empty line separation
+      "<!DOCTYPE html>\n"
+      "<html>\n"
+      "<head><title>C TCP Server</title></head>\n"
+      "<body><h1>Hello from a raw C TCP Socket!</h1></body>\n"
+      "</html>\n";
   char buffer[BUFFER_SIZE];
-  while (1) {
-    memset(buffer, 0, BUFFER_SIZE);
-    ssize_t bytes_received = recv(acceptfd, buffer, sizeof(buffer) - 1, 0);
 
-    if (bytes_received < 0) {
-      perror("Receiving messages has failed.");
-      break;
-    } else if (bytes_received == 0) {
-      printf("Client has disconnected.");
-      exit(0);
+  while (1) {
+    acceptfd = accept(sockfd, (struct sockaddr *)&addr, &addr_len);
+    if (errno == -1 || acceptfd < 0) {
+      perror("Failed to accept incoming connections");
+      close(sockfd);
+      close(acceptfd);
+      exit(-1);
     }
 
-    printf("Received: %s", buffer);
+    while (1) {
+      memset(buffer, 0, BUFFER_SIZE);
+      ssize_t bytes_received = recv(acceptfd, buffer, sizeof(buffer) - 1, 0);
+
+      if (bytes_received < 0) {
+        perror("Receiving messages has failed.");
+        break;
+      } else if (bytes_received == 0) {
+        printf("Client has disconnected.");
+        exit(0);
+      }
+
+      printf("Received: %s", buffer);
+      send(acceptfd, http_response, strlen(http_response) - 1, 0);
+      close(acceptfd);
+    }
   }
 
   close(acceptfd);

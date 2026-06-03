@@ -1,4 +1,3 @@
-#include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,20 +6,33 @@
 #include <unistd.h>
 
 #define DEFAULT_PORT 8080
-#define BUFFER_SIZE 2048
+#define HTTP_REQUEST_SIZE 2048
+#define HTTP_REQUEST_PATH_MAX_SIZE 255
+#define HTTP_REQUEST_VERB_MAX_SIZE 7
+
+void identify_request(char http_request[], char *verb, char *path) {
+  char *token = strtok(http_request, " ");
+  if (token != NULL) {
+    strcpy(verb, token);
+  }
+  token = strtok(NULL, " ");
+  if (token != NULL) {
+    strcpy(path, token);
+  }
+}
 
 int cast_to_int(const char *arg) {
   char *endptr;
-  strtol(arg, &endptr, 10);
-  if (*endptr == '\0') {
-    return atoi(arg);
+  long val = strtol(arg, &endptr, 10);
+  if (*endptr != '\0' || val <= 0 || val > 65535) {
+    return DEFAULT_PORT;
   }
-  return DEFAULT_PORT;
+  return (int)val;
 }
 
 int main(int argc, char *argv[]) {
   if (argc < 3 || strcmp(argv[1], "--port") != 0) {
-    perror("Invalid command usage. Missing --port argument.");
+    printf("Invalid command usage: missing --port argument.");
     exit(1);
   }
 
@@ -28,9 +40,18 @@ int main(int argc, char *argv[]) {
   int port = cast_to_int(argv[2]);
 
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (errno == -1) {
-    perror("Failed to create a socket.");
-    exit(-1);
+  if (sockfd < 0) {
+    perror("Failed to create a socket");
+    exit(1);
+  }
+
+  int opt = 1;
+  int re_use_addr =
+      setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  if (re_use_addr < 0) {
+    perror("Failed to re use the same address");
+    close(sockfd);
+    exit(1);
   }
 
   addr.sin_family = AF_INET;
@@ -38,58 +59,62 @@ int main(int argc, char *argv[]) {
   addr.sin_port = htons(port);
 
   int res = bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
-  if (errno == -1 || res < 0) {
-    printf("Failed to listen on port %d", port);
+  if (res < 0) {
+    perror("Failed to listen on sepecified port");
     close(sockfd);
-    exit(-1);
+    exit(1);
   }
 
-  int l_res = listen(sockfd, 0);
-  if (errno == -1 || l_res < 0) {
-    perror("Failed to listen to the server.");
+  int l_res = listen(sockfd, SOMAXCONN);
+  if (l_res < 0) {
+    perror("Failed to listen to the server");
     close(sockfd);
-    exit(-1);
+    exit(1);
   }
 
   int acceptfd;
+  char verb[HTTP_REQUEST_VERB_MAX_SIZE], path[HTTP_REQUEST_PATH_MAX_SIZE];
   socklen_t addr_len = sizeof(addr);
-  const char *http_response =
-      "HTTP/1.1 200 OK\r\n"
-      "Content-Type: text/html; charset=UTF-8\r\n"
-      "Connection: close\r\n"
-      "\r\n" // Crucial empty line separation
-      "<!DOCTYPE html>\n"
-      "<html>\n"
-      "<head><title>C TCP Server</title></head>\n"
-      "<body><h1>Hello from a raw C TCP Socket!</h1></body>\n"
-      "</html>\n";
-  char buffer[BUFFER_SIZE];
+  char http_request[HTTP_REQUEST_SIZE];
+  const char *http_response = "HTTP/1.1 200 OK\r\n"
+                              "Content-Type: text/plain; charset=UTF-8\r\n"
+                              "Connection: close\r\n"
+                              "\r\n"
+                              "C TCP Server\n"
+                              "Hello from a raw C TCP Socket!\n";
 
   while (1) {
     acceptfd = accept(sockfd, (struct sockaddr *)&addr, &addr_len);
-    if (errno == -1 || acceptfd < 0) {
+    if (acceptfd < 0) {
       perror("Failed to accept incoming connections");
       close(sockfd);
-      close(acceptfd);
-      exit(-1);
+      exit(1);
     }
 
-    while (1) {
-      memset(buffer, 0, BUFFER_SIZE);
-      ssize_t bytes_received = recv(acceptfd, buffer, sizeof(buffer) - 1, 0);
+    memset(http_request, 0, HTTP_REQUEST_SIZE);
+    ssize_t bytes_received =
+        recv(acceptfd, http_request, sizeof(http_request) - 1, 0);
 
-      if (bytes_received < 0) {
-        perror("Receiving messages has failed.");
-        break;
-      } else if (bytes_received == 0) {
-        printf("Client has disconnected.");
-        exit(0);
-      }
-
-      printf("Received: %s", buffer);
-      send(acceptfd, http_response, strlen(http_response) - 1, 0);
-      close(acceptfd);
+    if (bytes_received < 0) {
+      perror("Receiving messages has failed");
+      break;
+    } else if (bytes_received == 0) {
+      printf("Client has disconnected.");
+      break;
     }
+
+    identify_request(http_request, verb, path);
+    if (strcmp(verb, "GET") == 0) {
+      printf("GET request has being received at: %s\n", path);
+    }
+
+    int send_res = send(acceptfd, http_response, strlen(http_response) - 1, 0);
+    if (send_res < 0) {
+      perror("Failed to send response to client");
+    }
+
+    close(acceptfd);
+    acceptfd = -1;
   }
 
   close(acceptfd);

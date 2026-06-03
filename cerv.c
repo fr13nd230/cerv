@@ -7,117 +7,279 @@
 
 #define DEFAULT_PORT 8080
 #define HTTP_REQUEST_SIZE 2048
-#define HTTP_REQUEST_PATH_MAX_SIZE 255
-#define HTTP_REQUEST_VERB_MAX_SIZE 7
+#define HTTP_REQUEST_PATH_MAX_SIZE 256
+#define HTTP_REQUEST_VERB_MAX_SIZE 16
+#define RESPONSE_SIZE 16384
 
-void identify_request(char http_request[], char *verb, char *path) {
-  char *token = strtok(http_request, " ");
-  if (token != NULL) {
-    strcpy(verb, token);
-  }
-  token = strtok(NULL, " ");
-  if (token != NULL) {
-    strcpy(path, token);
-  }
+char *load_file(const char *path) {
+    FILE *file = fopen(path, "rb");
+
+    if (file == NULL) {
+        return NULL;
+    }
+
+    if (fseek(file, 0L, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+
+    long file_size = ftell(file);
+
+    if (file_size < 0) {
+        fclose(file);
+        return NULL;
+    }
+
+    if (fseek(file, 0L, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+
+    char *buffer = malloc(file_size + 1);
+
+    if (buffer == NULL) {
+        fclose(file);
+        return NULL;
+    }
+
+    size_t bytes_read = fread(buffer, 1, file_size, file);
+
+    if (bytes_read != (size_t)file_size) {
+        free(buffer);
+        fclose(file);
+        return NULL;
+    }
+
+    buffer[file_size] = '\0';
+
+    fclose(file);
+
+    return buffer;
+}
+
+void identify_request(char http_request[],
+                      char *verb,
+                      char *path) {
+    char *token = strtok(http_request, " ");
+
+    if (token != NULL) {
+        strncpy(verb, token, HTTP_REQUEST_VERB_MAX_SIZE - 1);
+        verb[HTTP_REQUEST_VERB_MAX_SIZE - 1] = '\0';
+    }
+
+    token = strtok(NULL, " ");
+
+    if (token != NULL) {
+        strncpy(path, token, HTTP_REQUEST_PATH_MAX_SIZE - 1);
+        path[HTTP_REQUEST_PATH_MAX_SIZE - 1] = '\0';
+    }
 }
 
 int cast_to_int(const char *arg) {
-  char *endptr;
-  long val = strtol(arg, &endptr, 10);
-  if (*endptr != '\0' || val <= 0 || val > 65535) {
-    return DEFAULT_PORT;
-  }
-  return (int)val;
+    char *endptr;
+
+    long val = strtol(arg, &endptr, 10);
+
+    if (*endptr != '\0' || val <= 0 || val > 65535) {
+        return DEFAULT_PORT;
+    }
+
+    return (int)val;
+}
+
+void send_response(int client_fd,
+                   const char *status,
+                   const char *content_type,
+                   const char *body) {
+    char response[RESPONSE_SIZE];
+
+    int written = snprintf(
+        response,
+        sizeof(response),
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: %s\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        status,
+        content_type,
+        body
+    );
+
+    if (written < 0) {
+        perror("snprintf");
+        return;
+    }
+
+    send(client_fd, response, strlen(response), 0);
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 3 || strcmp(argv[1], "--port") != 0) {
-    printf("Invalid command usage: missing --port argument.");
-    exit(1);
-  }
+    if (argc < 3 || strcmp(argv[1], "--port") != 0) {
+        fprintf(stderr, "Usage: %s --port <port>\n", argv[0]);
+        return 1;
+    }
 
-  struct sockaddr_in addr;
-  int port = cast_to_int(argv[2]);
+    int port = cast_to_int(argv[2]);
 
-  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    perror("Failed to create a socket");
-    exit(1);
-  }
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
-  int opt = 1;
-  int re_use_addr =
-      setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-  if (re_use_addr < 0) {
-    perror("Failed to re use the same address");
+    if (sockfd < 0) {
+        perror("socket");
+        return 1;
+    }
+
+    int opt = 1;
+
+    if (setsockopt(
+            sockfd,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &opt,
+            sizeof(opt)) < 0) {
+
+        perror("setsockopt");
+        close(sockfd);
+        return 1;
+    }
+
+    struct sockaddr_in addr;
+
+    memset(&addr, 0, sizeof(addr));
+
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(
+            sockfd,
+            (struct sockaddr *)&addr,
+            sizeof(addr)) < 0) {
+
+        perror("bind");
+        close(sockfd);
+        return 1;
+    }
+
+    if (listen(sockfd, SOMAXCONN) < 0) {
+        perror("listen");
+        close(sockfd);
+        return 1;
+    }
+
+    printf("Listening on port %d\n", port);
+
+    while (1) {
+        socklen_t addr_len = sizeof(addr);
+
+        int client_fd =
+            accept(
+                sockfd,
+                (struct sockaddr *)&addr,
+                &addr_len
+            );
+
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
+
+        char http_request[HTTP_REQUEST_SIZE];
+
+        memset(http_request, 0, sizeof(http_request));
+
+        ssize_t bytes_received =
+            recv(
+                client_fd,
+                http_request,
+                sizeof(http_request) - 1,
+                0
+            );
+
+        if (bytes_received < 0) {
+            perror("recv");
+            close(client_fd);
+            continue;
+        }
+
+        if (bytes_received == 0) {
+            close(client_fd);
+            continue;
+        }
+
+        char verb[HTTP_REQUEST_VERB_MAX_SIZE] = {0};
+        char path[HTTP_REQUEST_PATH_MAX_SIZE] = {0};
+
+        identify_request(http_request, verb, path);
+
+        if (strcmp(verb, "GET") != 0) {
+            send_response(
+                client_fd,
+                "405 METHOD NOT ALLOWED",
+                "text/plain; charset=UTF-8",
+                "405 Method Not Allowed"
+            );
+
+            close(client_fd);
+            continue;
+        }
+
+        if (strstr(path, "..") != NULL) {
+            send_response(
+                client_fd,
+                "403 FORBIDDEN",
+                "text/plain; charset=UTF-8",
+                "403 Forbidden"
+            );
+
+            close(client_fd);
+            continue;
+        }
+
+        char full_path[512];
+
+        if (strcmp(path, "/") == 0) {
+            snprintf(
+                full_path,
+                sizeof(full_path),
+                "./index.html"
+            );
+        } else {
+            snprintf(
+                full_path,
+                sizeof(full_path),
+                ".%s",
+                path
+            );
+        }
+
+        char *content = load_file(full_path);
+
+        if (content == NULL) {
+            send_response(
+                client_fd,
+                "404 NOT FOUND",
+                "text/plain; charset=UTF-8",
+                "404 Not Found"
+            );
+
+            close(client_fd);
+            continue;
+        }
+
+        send_response(
+            client_fd,
+            "200 OK",
+            "text/html; charset=UTF-8",
+            content
+        );
+
+        free(content);
+
+        close(client_fd);
+    }
+
     close(sockfd);
-    exit(1);
-  }
 
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port = htons(port);
-
-  int res = bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
-  if (res < 0) {
-    perror("Failed to listen on sepecified port");
-    close(sockfd);
-    exit(1);
-  }
-
-  int l_res = listen(sockfd, SOMAXCONN);
-  if (l_res < 0) {
-    perror("Failed to listen to the server");
-    close(sockfd);
-    exit(1);
-  }
-
-  int acceptfd;
-  char verb[HTTP_REQUEST_VERB_MAX_SIZE], path[HTTP_REQUEST_PATH_MAX_SIZE];
-  socklen_t addr_len = sizeof(addr);
-  char http_request[HTTP_REQUEST_SIZE];
-  const char *http_response = "HTTP/1.1 200 OK\r\n"
-                              "Content-Type: text/plain; charset=UTF-8\r\n"
-                              "Connection: close\r\n"
-                              "\r\n"
-                              "C TCP Server\n"
-                              "Hello from a raw C TCP Socket!\n";
-
-  while (1) {
-    acceptfd = accept(sockfd, (struct sockaddr *)&addr, &addr_len);
-    if (acceptfd < 0) {
-      perror("Failed to accept incoming connections");
-      close(sockfd);
-      exit(1);
-    }
-
-    memset(http_request, 0, HTTP_REQUEST_SIZE);
-    ssize_t bytes_received =
-        recv(acceptfd, http_request, sizeof(http_request) - 1, 0);
-
-    if (bytes_received < 0) {
-      perror("Receiving messages has failed");
-      break;
-    } else if (bytes_received == 0) {
-      printf("Client has disconnected.");
-      break;
-    }
-
-    identify_request(http_request, verb, path);
-    if (strcmp(verb, "GET") == 0) {
-      printf("GET request has being received at: %s\n", path);
-    }
-
-    int send_res = send(acceptfd, http_response, strlen(http_response) - 1, 0);
-    if (send_res < 0) {
-      perror("Failed to send response to client");
-    }
-
-    close(acceptfd);
-    acceptfd = -1;
-  }
-
-  close(acceptfd);
-  close(sockfd);
-  return 0;
+    return 0;
 }
